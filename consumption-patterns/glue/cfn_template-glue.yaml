@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "Batch Glue job using pyspark"
+Parameters:
+  InputBucket:
+    Type: String
+    Description: Location of csv dataset to be pseudonymized
+  OutputBucket:
+    Type: String
+    Description: Location of glue job output
+  AppBucket:
+    Type: String
+    Default: ''
+    Description: Location of pyspark script and config files.
+#**********************************Resources**********************************
+Resources:
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-glue-policy'
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                  - 'secretsmanager:DescribeSecret'
+                  - 'secretsmanager:ListSecretVersionIds'
+                  - 'secretsmanager:TagResource'
+                  - 'secretsmanager:UntagResource'
+                Resource: !Ref ApiKey
+              - Effect: Allow
+                Action:
+                  - 's3:*'
+                Resource: 
+                  - !Sub 'arn:aws:s3:::${OutputBucket}'
+                  - !Sub 'arn:aws:s3:::${InputBucket}'
+                  - !Sub 'arn:aws:s3:::${AppBucket}'
+                  - !Sub 'arn:aws:s3:::${OutputBucket}/*'
+                  - !Sub 'arn:aws:s3:::${InputBucket}/*'
+                  - !Sub 'arn:aws:s3:::${AppBucket}/*'
+  GlueJob:
+    Type: AWS::Glue::Job
+    Properties: 
+      Command: 
+        Name: glue-command
+        ScriptLocation: !Sub "s3://${AppBucketLocation}/pyspark-batch-pseudo.py"
+      Description: glue batch job
+      GlueVersion: 3.0
+      Name: glue-batch-job
+      Role: !Ref GlueJobRole
+      WorkerType: Standard
+      NumberOfWorkers: 2
+      DefaultArguments: {
+        "--configuration" : !Sub "s3://${AppBucketLocation}/glue_config.yaml",
+        "--TempDir": !Sub "s3://${AppBucketLocation}/"
+                        }
+
+
+#---------------------------------S3 Buckets----------------------------------
+  OutputBucketLocation:
+    Type: AWS::S3::Bucket
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref OutputBucket
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  
+  AppBucketLocation:
+    Type: AWS::S3::Bucket
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref AppBucket
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+#------------------------------SecretManager----------------------------------
+  ApiKey:
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Name: !Sub "api_key-${AWS::StackName}"
+# --------------------------------Outputs--------------------------------------
+Outputs:
+  ApiKey:
+    Description: Secret name for the API key
+    Value: !Ref 'ApiKey'
+  AppBucketLocation:
+    Description: Location of pyspark script and config files.
+    Value: !Ref 'AppBucketLocation'
+  OutputBucketLocation:
+    Description: Glue job data output location
+    Value: !Ref 'OutputBucketLocation'
+  GlueJobRole:
+    Description: Glue Job IAM role
+    Value: !Ref 'GlueJobRole'
+  GlueJob:
+    Description: ''
+    Value: !Ref 'GlueJob'
+
+
+

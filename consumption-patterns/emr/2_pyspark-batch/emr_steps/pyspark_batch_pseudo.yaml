@@ -1,0 +1,10 @@
+repartition_no: 1
+aws_region: <YOUR_REGION>
+endpoint_url: <YOUR_API_GW>.execute-api.<YOUR_REGION>.amazonaws.com/<STAGE>/<ACTION>
+secret_name: <SECRET_NAME>
+determinism: True
+input_s3_path: s3://YOUR_INPUT_S3_BUCKET/YOUR_INPUT_FOLDER
+output_bucket_name: s3://YOUR_OUTPUT_S3_BUCKET/
+input_column: vin
+db_name: blog_batch_db
+table_name: pseudo_table

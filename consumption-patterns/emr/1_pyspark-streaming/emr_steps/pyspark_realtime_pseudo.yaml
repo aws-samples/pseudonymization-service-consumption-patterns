@@ -1,0 +1,11 @@
+repartition_no: 1
+kinesis_stream_name: " "
+kinesis_endpoint_url: " "
+kinesis_region: " "
+endpoint_url: " "
+secret_name: " "
+determinism: True
+output_bucket_name: " "
+input_column: vin
+db_name: blog_stream_db
+table_name: pseudo_table

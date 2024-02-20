@@ -1,0 +1,12 @@
+
+# When defining the glue job, a job parameter must be defined to speficy the s3 location of this config file like this:
+#--configuration: s3://YOUR_CONFIG_BUCKET/pyspark-batch_pseudo.yaml
+
+repartition_no: 1
+aws_region: <YOUR_REGION>
+endpoint_url: <YOUR_API_GW>.execute-api.<YOUR_REGION>.amazonaws.com/<STAGE>/<ACTION>
+secret_name: <SECRET_NAME>
+determinism: True
+input_loc: s3://YOUR_INPUT_S3_BUCKET/YOUR_INPUT_FILE.csv
+output_loc: s3://YOUR_OUTPUT_S3_BUCKET/
+input_column: VIN

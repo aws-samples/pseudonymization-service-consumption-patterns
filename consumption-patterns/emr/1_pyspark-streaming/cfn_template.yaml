@@ -1,0 +1,495 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "Streaming spark application on EMR"
+Parameters:
+  ArtifactBucketName:
+    Type: String
+    Default: ''
+    Description: Location of all config Artifacts.
+  LogBucketName:
+    Type: String
+    Default: ''
+    Description: Location of all EMR logs.
+  OutputBucketName:
+    Type: String
+    Default: ''
+    Description: Location of target dataset.
+  ApiKeyArn:
+    Type: String
+    Default: ''
+    Description: ARN of Secrets Manager secret.
+  KinesisStream:
+    Type: String
+    Default: ''
+    Description: Kinesis Stream name where the events should be published.
+  BootstrapAction:
+    Type: String
+    Default: bootstrap.sh
+  SparkScript:
+    Type: String
+    Default: pyspark_realtime_pseudo.py
+    Description: PySpark script location
+  SparkConfiguration:
+    Type: String
+    Default: pyspark_realtime_config.yaml
+    Description: PySpark parameters
+  Master:
+    ConstraintDescription: must be a valid EC2 instance type.
+    Default: m5.xlarge
+    Description: EC2 instance type
+    Type: String
+  Core:
+    ConstraintDescription: must be a valid EC2 instance type.
+    Default: m5.xlarge
+    Description: EC2 instance type
+    Type: String
+  SubnetId:
+    Description: "Select the first Private Subnet"
+    Type: "AWS::EC2::Subnet::Id"
+#**********************************Resources**********************************
+Resources:
+#---------------------------------S3 Buckets----------------------------------
+  SparkAppLogBucket:
+    Type: AWS::S3::Bucket
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub '${LogBucketName}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  SparkOutputBucket:
+    Type: AWS::S3::Bucket
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub '${OutputBucketName}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+#----------------------------Kinesis Data Stream------------------------------
+  DataStream:
+    Type: AWS::Kinesis::Stream
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Name of the stream is referenced in portion of the code external to the CF template
+    Properties:
+      Name: !Ref 'KinesisStream'
+      StreamModeDetails:
+          StreamMode: ON_DEMAND
+      StreamEncryption:
+        EncryptionType: 'KMS'
+        KeyId: alias/aws/kinesis
+#------------------------------EMR InProfile----------------------------------
+  EMRInstanceProfile:
+    Properties:
+      Path: /
+      Roles:
+        - !Ref 'EMRJobFlowRole'
+    Type: AWS::IAM::InstanceProfile
+#--------------------------------IAM Roles------------------------------------
+  EMRJobFlowRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: Refer to inline comments for suppression reasons
+          - id: W76
+            reason: All permissions listed are required for the EMR cluster
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-emr-ec2-policy'
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                  - 'secretsmanager:DescribeSecret'
+                  - 'secretsmanager:ListSecretVersionIds'
+                  - 'secretsmanager:TagResource'
+                  - 'secretsmanager:UntagResource'
+                Resource: !Ref ApiKeyArn
+
+              - Effect: Allow
+                Action:
+                  # EMR nodes need to have read-only access to EC2, EMR and DynamoDB APIs
+                  - ec2:Describe*
+                  - elasticmapreduce:Describe*
+                  - dynamodb:DescribeTable
+                  - dynamodb:CreateTable
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Scan
+                  - dynamodb:DeleteTable
+                  - dynamodb:DeleteItem
+                  # Glue permissions for Iceberg Table format integration
+                  - glue:CreateDatabase
+                  - glue:GetDatabase
+                  - glue:GetTables
+                  - glue:GetTable
+                  - glue:CreateTable
+                  - glue:UpdateTable
+                  - glue:CreatePartition
+                  - glue:BatchCreatePartition
+                  - glue:GetPartition
+                  - glue:GetPartitions
+                  - glue:BatchGetPartition
+                  # Actions do not support resource level permissions
+                  - elasticmapreduce:ListClusters
+                  - s3:HeadBucket
+                  - kinesis:ListShards
+                Resource: '*'
+              - Effect: Allow
+                # Cluster id is not available when role is created
+                Resource: !Sub 'arn:aws:elasticmapreduce:${AWS::Region}:${AWS::AccountId}:cluster/*'
+                Action:
+                  - elasticmapreduce:AddJobFlowSteps
+                  - elasticmapreduce:ListBootstrapActions
+                  - elasticmapreduce:ListInstanceGroups
+                  - elasticmapreduce:ListInstances
+                  - elasticmapreduce:ListSteps
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:GetBucketCORS
+                  - s3:GetObjectVersionForReplication
+                  - s3:GetObject
+                  - s3:GetBucketTagging
+                  - s3:GetObjectVersion
+                  - s3:GetObjectTagging
+                  - s3:ListMultipartUploadParts
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:PutObject
+                  - s3:PutObjectTagging
+                  - s3:DeleteObject
+                Resource:
+                  # Limited to buckets created in this stack
+                  - !Sub 'arn:aws:s3:::${ArtifactBucketName}'
+                  - !Sub 'arn:aws:s3:::${ArtifactBucketName}/*'
+                  - !Sub 'arn:aws:s3:::${OutputBucketName}'
+                  - !Sub 'arn:aws:s3:::${OutputBucketName}/*'
+                  - !Sub 'arn:aws:s3:::${LogBucketName}'
+                  - !Sub 'arn:aws:s3:::${LogBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${AWS::Region}.elasticmapreduce/libs/script-runner/script-runner.jar'
+              - Effect: Allow
+                Action:
+                  - kinesis:Get*
+                  - kinesis:List*
+                  - kinesis:Describe*
+                Resource: !GetAtt DataStream.Arn
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                # https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-encryption-enable.html#emr-encryption-create-keys
+                Resource: !GetAtt EMRAtRestKey.Arn
+              - Effect: Allow
+                Action:
+                  - kms:CreateGrant
+                  - kms:ListGrants
+                  - kms:RevokeGrant
+                # https://aws.amazon.com/blogs/big-data/secure-your-data-on-amazon-emr-using-native-ebs-and-per-bucket-s3-encryption-options
+                Resource: !GetAtt EMRAtRestKey.Arn
+                Condition:
+                  Bool:
+                    kms:GrantIsForAWSResource: true
+  EMRServiceRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: Refer to inline comments for suppression reasons
+          - id: W76
+            reason: All permissions listed are required for the EMR cluster
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - elasticmapreduce.amazonaws.com
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-emr-service-policy'
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                  - 'secretsmanager:DescribeSecret'
+                  - 'secretsmanager:ListSecretVersionIds'
+                  - 'secretsmanager:TagResource'
+                  - 'secretsmanager:UntagResource'
+                Resource: !Ref ApiKeyArn
+              - Effect: Allow
+                Action:
+                  - kinesis:Get*
+                  - kinesis:List*
+                  - kinesis:Describe*
+                Resource: !GetAtt DataStream.Arn
+              - Effect: Allow
+                Action:
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:CancelSpotInstanceRequests
+                  - ec2:CreateNetworkInterface
+                  - ec2:CreateSecurityGroup
+                  - ec2:CreateTags
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DeleteTags
+                  - ec2:DeleteSecurityGroup
+                  - ec2:DescribeAvailabilityZones
+                  - ec2:DescribeAccountAttributes
+                  - ec2:DescribeDhcpOptions
+                  - ec2:DescribeImages
+                  - ec2:DescribeInstanceStatus
+                  - ec2:DescribeInstances
+                  - ec2:DescribeKeyPairs
+                  - ec2:DescribeNetworkAcls
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribePrefixLists
+                  - ec2:DescribeRouteTables
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSpotInstanceRequests
+                  - ec2:DescribeSpotPriceHistory
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeTags
+                  - ec2:DescribeVpcAttribute
+                  - ec2:DescribeVpcEndpoints
+                  - ec2:DescribeVpcEndpointServices
+                  - ec2:DescribeVpcs
+                  - ec2:DetachNetworkInterface
+                  - ec2:ModifyImageAttribute
+                  - ec2:ModifyInstanceAttribute
+                  - ec2:RequestSpotInstances
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:RunInstances
+                  - ec2:TerminateInstances
+                  - ec2:DeleteVolume
+                  - ec2:DescribeVolumeStatus
+                  - ec2:DescribeVolumes
+                  - ec2:DetachVolume
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListInstanceProfiles
+                  - iam:ListRolePolicies
+                  - s3:CreateBucket
+                  - sdb:BatchPutAttributes
+                  - sdb:Select
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:DeleteAlarms
+                  - application-autoscaling:RegisterScalableTarget
+                  - application-autoscaling:DeregisterScalableTarget
+                  - application-autoscaling:PutScalingPolicy
+                  - application-autoscaling:DeleteScalingPolicy
+                  - application-autoscaling:Describe*
+                # Minimal permissions for EMR to work properly (https://aws.amazon.com/blogs/big-data/best-practices-for-securing-amazon-emr/)
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:GetBucketCORS
+                  - s3:GetObjectVersionForReplication
+                  - s3:GetObject
+                  - s3:GetBucketTagging
+                  - s3:GetObjectVersion
+                  - s3:GetObjectTagging
+                  - s3:ListMultipartUploadParts
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                Resource:
+                  # Limited to buckets created in this stack
+                  - !Sub 'arn:aws:s3:::${ArtifactBucketName}'
+                  - !Sub 'arn:aws:s3:::${ArtifactBucketName}/*'
+                  - !Sub 'arn:aws:s3:::${OutputBucketName}'
+                  - !Sub 'arn:aws:s3:::${OutputBucketName}/*'
+                  - !Sub 'arn:aws:s3:::${LogBucketName}'
+                  - !Sub 'arn:aws:s3:::${LogBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - sqs:CreateQueue
+                  - sqs:DeleteQueue
+                  - sqs:DeleteMessage
+                  - sqs:DeleteMessageBatch
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                  - sqs:PurgeQueue
+                  - sqs:ReceiveMessage
+                # Limited to queues whose names are prefixed with the literal string AWS-ElasticMapReduce-
+                Resource: !Sub 'arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:AWS-ElasticMapReduce-*'
+              - Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                # EMR needs permissions to create this service-linked role for launching EC2 spot instances
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/spot.amazonaws.com/AWSServiceRoleForEC2Spot*'
+                Condition:
+                  StringLike:
+                    iam:AWSServiceName: spot.amazonaws.com
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !GetAtt 'EMRJobFlowRole.Arn'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/EMR_AutoScaling_DefaultRole'
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                # https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-encryption-enable.html#emr-encryption-create-keys
+                Resource: !GetAtt EMRAtRestKey.Arn
+              - Effect: Allow
+                Action:
+                  - kms:CreateGrant
+                  - kms:ListGrants
+                  - kms:RevokeGrant
+                # https://aws.amazon.com/blogs/big-data/secure-your-data-on-amazon-emr-using-native-ebs-and-per-bucket-s3-encryption-options
+                Resource: !GetAtt EMRAtRestKey.Arn
+                Condition:
+                  Bool:
+                    kms:GrantIsForAWSResource: true
+#---------------------------------KMS Key-------------------------------------
+  EMRAtRestKey:
+    Type: AWS::KMS::Key
+    Properties:
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: !Sub '${AWS::StackName}-emr-security-key'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: kms:*
+            Resource: '*'
+#-------------------------------EMR Cluster-----------------------------------
+  EMRCluster:
+    Type: AWS::EMR::Cluster
+    Properties:
+      Applications:
+        - Name: Hadoop
+        - Name: Spark
+      BootstrapActions: 
+        - Name: Bootstrap
+          ScriptBootstrapAction:
+            Path: !Sub 's3://${ArtifactBucketName}/${BootstrapAction}'
+      Instances:
+        CoreInstanceGroup:
+          InstanceCount: 2
+          InstanceType: !Ref 'Core'
+          Market: ON_DEMAND
+          Name: Core Instance
+        Ec2SubnetId: !Ref SubnetId
+        MasterInstanceGroup:
+          InstanceCount: 1
+          InstanceType: !Ref 'Master'
+          Market: ON_DEMAND
+          Name: Master Instance
+      LogUri: !Join
+        - ''
+        - - s3://
+          - !Ref 'SparkAppLogBucket'
+      JobFlowRole: !Ref 'EMRInstanceProfile'
+      Name: Pyspark-Streaming-Pseudonimizer
+      ReleaseLabel: emr-6.6.0
+      ServiceRole: !Ref 'EMRServiceRole' 
+      VisibleToAllUsers: true
+      Configurations:
+        - Classification: spark-defaults
+          ConfigurationProperties: {
+            "spark.dynamicAllocation.enabled": "true"
+          }
+        - Classification: iceberg-defaults
+          ConfigurationProperties: {
+            "iceberg.enabled": "true"
+          }
+        - Classification: hive-site
+          ConfigurationProperties: {
+            "hive.metastore.client.factory.class": "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory",
+            "hive.metastore.schema.verification": "false"
+          }
+        - Classification: spark-hive-site
+          ConfigurationProperties: {
+            "hive.metastore.client.factory.class": "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"
+          }
+#-------------------------------Spark Step------------------------------------
+  SparkStep:
+    Type: AWS::EMR::Step
+    Properties:
+      ActionOnFailure: CANCEL_AND_WAIT
+      HadoopJarStep:
+        Args:
+          - spark-submit
+          - --deploy-mode
+          - client
+          - --packages
+          - org.apache.spark:spark-streaming-kinesis-asl_2.12:3.1.3
+          - --conf 
+          - spark.sql.defaultCatalog=iceberg_catalog
+          - --conf 
+          - spark.sql.catalog.iceberg_catalog=org.apache.iceberg.spark.SparkCatalog
+          - --conf 
+          - !Sub spark.sql.catalog.iceberg_catalog.warehouse=s3://${SparkOutputBucket}/realtime/warehouse/blog_stream_db
+          - --conf 
+          - spark.sql.catalog.iceberg_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog
+          - --conf 
+          - spark.sql.catalog.iceberg_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO
+          - --conf 
+          - spark.sql.catalog.iceberg_catalog.lock-impl=org.apache.iceberg.aws.glue.DynamoLockManager
+          - --conf 
+          - spark.sql.catalog.iceberg_catalog.lock.table=blogStreamGlueLockTable
+          - !Sub s3://${ArtifactBucketName}/${SparkScript}
+          - !Sub s3://${ArtifactBucketName}/${SparkConfiguration}
+        Jar: command-runner.jar
+      Name: PySpark_Streaming
+      JobFlowId: !Ref 'EMRCluster'
+#--------------------------------Outputs--------------------------------------
+Outputs:
+  ArtifactLocation:
+    Description: Name of the Artifact Bucket
+    Value: !Ref 'ArtifactBucketName'
+  SparkOutputLocation:
+    Description: Spark Streaming Historical data output location
+    Value: !Ref 'SparkOutputBucket'
+  KinesisStreamName:
+    Description: Kinesis ARN - Default default-data-stream
+    Value: !GetAtt 'DataStream.Arn'
+  EMRClusterId:
+    Description: EMR Cluster
+    Value: !Ref 'EMRCluster'

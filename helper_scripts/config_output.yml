@@ -1,0 +1,9 @@
+determinism: true
+endpoint_url: test3
+input_column: vin
+kinesis_endpoint_url: https://kinesis.test2.amazonaws.com
+kinesis_region: test2
+kinesis_stream_name: test1
+output_bucket_name: test5
+secret_name: test4
+worker_no: 2
